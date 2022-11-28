@@ -1,0 +1,242 @@
+#!/bin/bash
+
+BASENAME=`basename $0`
+ISDEFINED=0
+ISDEBUG=0
+FAIL=0
+
+# Regular Colors
+Red='\033[0;31m'          # Red
+Green='\033[0;32m'        # Green
+Yellow='\033[0;33m'       # Yellow
+Blue='\033[0;34m'         # Blue
+Purple='\033[0;35m'       # Purple
+Cyan='\033[0;36m'         # Cyan
+
+# Reset
+Color_Off='\033[0m'       # Text Reset
+
+
+WINFIOL_PATH="/ericsson/winfiol"
+export WINFIOL_PATH
+
+
+settingsXML=$WINFIOL_PATH/etc/winfiol_settings.xml
+wfcliExecutable=$WINFIOL_PATH/bin/wfcli
+
+LOG_PATH="${HOME}/winfiol/logfiles"
+
+processes=20
+waitFor=10
+printOutput=0
+interval=1
+pids=""
+commands=""
+commandsdir=0
+channelsdir=0
+NODES=()
+CHANNELS=()
+
+
+printDebug(){
+    if [ $ISDEBUG -eq 1 ]; then
+        echo $@
+    fi
+}
+
+
+maxConcurrentProcesses=($(cat $settingsXML | grep -oP '(?<=MaximumNumberOfConcurrentProcesses>)[^<]+'))
+if [[ -z "$maxConcurrentProcesses" ]]; then
+    maxConcurrentProcesses=20
+fi
+
+
+printUsage(){
+    echo "Usage: $BASENAME [options] <nodefile>|<nodelist>|<channelsdir>  <command(s)>|<commandfile>|<commanddir> [logdirectory]
+
+    Purpose: To send wfcli commands to several nodes in parallel.
+
+    Arguments:
+     - The first argument is the nodefile, nodelist or path to dir with channels files in xml format.
+    The nodefile is a file containing the list of nodes to connect to. Each line in the nodefile contains node name as in topology.
+    If using the nodelist, the nodes are listed on the command line and separated by commas.
+     - The second argument is the commmands or commandfile.
+    See example of commands below and commandfile in commands.txt
+    If a directory is given, then a different commandfile will be used for each node:
+            the name of each commandfile should be <node-name>.cmd
+            the <node-name> should be the same as defined in ENM topology.
+            example: node-name is node602 ==> commandfile should be node602.cmd
+     - The third argument (logdirectory) is optional. If no logdirectory is specified, a default one ($LOG_PATH) will be used.
+
+     Options:
+     -p <processes>     Specify the maximum number of wfcli sessions that will run in parallel (default=20, maximum=$maxConcurrentProcesses parallel sessions)
+     -i <seconds>       Specify the interval in seconds between spawning of each wfcli session (default=1 second).
+     -w <seconds>       Specify the interval in seconds between the checks on running sessions (default=10 seconds)
+     -o                 Print output of every wfcli session both to screen and to logfile.
+    
+    Examples:
+    *********
+     >> wfbatch -o bscs.txt \"mml|allip:alcat=apz;\"
+     >> wfbatch -o BSC001,BSC002 winfiol/commandfiles
+     >> wfbatch -o winfiol/channels commands.cmd
+     "
+    exit 1
+}
+
+
+if [ $processes -lt $maxConcurrentProcesses ]; then
+    maxConcurrentProcesses=$processes
+fi
+
+
+checkNodes(){
+    if [ ! -z "$1" ]; then
+        let "ISDEFINED+=1"
+    fi
+    if [ -f "$1" ]; then
+        echo "Nodes are file $1"
+        mapfile -t NODES < $1
+    elif [ -d "$1" ]; then
+        echo "Nodes are channels dir $1"
+        NODES=(`ls $1/*.xml`)
+        channelsdir=1
+    else
+        echo "Nodes are list $1"
+        IFS=',' read -ra NODES <<< $1
+    fi
+}
+
+
+checkCommands(){
+    if [ ! -z "$1" ]; then
+        let "ISDEFINED+=1"
+    fi
+    if [ -f "$1" ]; then
+        echo "Commands are file $1"
+        commands="--scriptfile $1"
+    elif [ -d "$1" ]; then
+        echo "Commands are dir $1"
+        commands="--scriptfile $1/"
+        commandsdir=1
+    else
+        echo "Commands are list $1"
+        IFS='|' read -ra CMDS <<< $1
+        for item in ${CMDS[@]}
+        do
+            commands="$commands --command $item"
+        done
+    fi
+}
+
+
+checkArguments(){
+    checkNodes $1
+    checkCommands $2
+    if [ -d "$3" ]; then
+        echo "Log dir is $3"
+        LOG_PATH=$3
+    else
+        echo "Log dir is $LOG_PATH"
+    fi
+}
+
+
+while [ $# -gt 0 ]; do
+   case "$1" in
+   -debug)
+        ISDEBUG=1
+        ;;
+   -help)
+        printUsage
+        ;;
+   -p*)
+        echo "Processes is $2"
+        processes=$2
+        shift
+        ;;
+   -i*)
+        echo "Interval is $2"
+        interval=$2
+        shift
+        ;;
+   -w*)
+        echo "Wait is $2"
+        waitFor=$2
+        shift
+        ;;
+   -o)
+        echo "Print output is enabled"
+        printOutput=1
+        ;;
+    *)
+        checkArguments $1 $2 $3
+        shift 2
+        ;;
+   esac
+   shift
+done
+
+
+catOutput(){
+    cat $LOG_PATH/$1.log | while read line
+    do
+        echo -e "$Cyan$1$Color_Off: $line" | awk -v green=$Green -v off=$Color_Off -v red=$Red '
+            /EXECUTED/{print green $0 off; next}
+            /FAULT/{print red $0 off; next}
+            {print $0}
+        '
+    done
+}
+
+
+bscExec(){
+    for (( ; ; ))
+    do
+        if [[ $(ps aux | grep $wfcliExecutable | grep -v grep | wc -l) -ge $maxConcurrentProcesses ]]; then
+            echo -e "${Red}Maximum number of concurrent WinFIOL-processes reached ("$maxConcurrentProcesses"). Waiting $waitFor seconds...${Color_Off}"
+            sleep $waitFor
+        else
+            echo -e "${Yellow}STARTING NODE $1: ${Color_Off}"
+            printDebug "/usr/local/bin/wfcli ${@:2} --logfile $LOG_PATH/$1.log --overwrite"
+            /usr/local/bin/wfcli ${@:2} --logfile $LOG_PATH/$1.log --overwrite
+            break
+        fi
+    done
+    if [ $printOutput -eq 1 ]; then
+        catOutput $1
+    fi
+}
+
+
+if [ $ISDEFINED -lt 2 ]; then
+    echo "Mandatory arguments not specified..."
+    printUsage
+fi
+
+
+for index in ${!NODES[*]}
+do
+    if [ $channelsdir -eq 1 ]; then
+        neid="--channelfile"
+    else
+        neid="--neid"
+    fi
+    CHANNELS[$index]="$neid ${NODES[$index]}"
+    base="${NODES[$index]##*/}"
+    NODES[$index]="${base%.*}"
+done
+
+
+for index in ${!CHANNELS[*]}
+do
+    cmdArg=$commands
+    if [ $commandsdir -eq 1 ]; then
+        cmdArg="$commands${NODES[$index]}.cmd"
+    fi
+    bscExec ${NODES[$index]} ${CHANNELS[$index]} $cmdArg &
+    sleep $interval
+    pids="$pids $!"
+done
+
+
+wait $pids
