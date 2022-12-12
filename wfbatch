@@ -178,14 +178,11 @@ done
 
 
 catOutput(){
-    cat $LOG_PATH/$1.log | while read line
-    do
-        echo -e "$line" | awk -F: -v green=$Green -v off=$Color_Off -v red=$Red -v node="$Cyan$1$Color_Off: " '
-            /EXECUTED/{print node green $0 off; next}
-            /FAULT/{print node red $0 off; next}
-            {print node $0}
-        '
-    done
+    awk -v green=$Green -v off=$Color_Off -v red=$Red -v node="$Cyan$1$Color_Off: " '
+        /EXECUTED/{print node green $0 off; next}
+        /NOT ACCEPTED/{print node red $0 off; next}
+        {print node $0}
+    ' $LOG_PATH/$1.log
 }
 
 
@@ -234,8 +231,8 @@ do
         cmdArg="$commands${NODES[$index]}.cmd"
     fi
     nodeExec ${NODES[$index]} ${CHANNELS[$index]} $cmdArg &
-    sleep $interval
     pids="$pids $!"
+    sleep $interval
 done
 
 
